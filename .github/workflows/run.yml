@@ -1,0 +1,89 @@
+
+name: Windows NoVNC (Panel)
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 385
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup System
+      run: |
+        netsh int tcp set global congestionprovider=ctcp
+        choco install googlechrome 7zip -y --no-progress --ignore-checksums
+    
+    - name: Configure Access
+      shell: pwsh
+      run: |
+        $pw = ConvertTo-SecureString "Vps@BcEjLT5A@4" -AsPlainText -Force
+        Set-LocalUser -Name "runneradmin" -Password $pw
+
+    - name: Setup VNC and Tunnel
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Continue"
+        
+        for ($i = 0; $i -lt 5; $i++) {
+          try {
+            Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.63/tightvnc-2.8.63-gpl-setup-64bit.msi" -OutFile "tightvnc-setup.msi" -TimeoutSec 180
+            if ((Get-Item "tightvnc-setup.msi").Length -gt 1000000) { break }
+          } catch { Start-Sleep -Seconds 5 }
+        }
+        
+        $vncpw = "Vps@BcEjLT5A@4"
+        Start-Process msiexec.exe -Wait -ArgumentList "/i","tightvnc-setup.msi","/quiet","/norestart","ADDLOCAL=Server","SERVER_REGISTER_AS_SERVICE=1","SERVER_ADD_FIREWALL_EXCEPTION=1","SET_USEVNCAUTHENTICATION=1","VALUE_OF_USEVNCAUTHENTICATION=1","SET_PASSWORD=1","VALUE_OF_PASSWORD=$vncpw"
+        
+        Restart-Service -Name "tvnserver" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 8
+        
+        python -m pip install --upgrade pip -q 2>$null
+        pip install websockify numpy -q 2>$null
+        
+        Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "noVNC.zip" -TimeoutSec 60
+        Expand-Archive -Path "noVNC.zip" -DestinationPath "." -Force
+        Rename-Item -Path "noVNC-1.5.0" -NewName "noVNC" -Force -ErrorAction SilentlyContinue
+        
+        Start-Process -FilePath "python" -ArgumentList "-m","websockify","6080","127.0.0.1:5900","--web","noVNC" -WindowStyle Hidden
+        Start-Sleep -Seconds 5
+        
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe" -TimeoutSec 60
+        Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel","--url","http://localhost:6080","--no-autoupdate","--logfile","cloudflared.log" -WindowStyle Hidden
+        
+        Start-Sleep -Seconds 35
+        
+        $tunnelUrl = ""
+        for ($j = 0; $j -lt 60; $j++) {
+          if (Test-Path "cloudflared.log") {
+            $logContent = Get-Content "cloudflared.log" -Raw -ErrorAction SilentlyContinue
+            $found = [regex]::Match($logContent, 'https://[a-zA-Z0-9-]+.trycloudflare.com')
+            if ($found.Success) {
+              $tunnelUrl = $found.Value
+              break
+            }
+          }
+          Start-Sleep -Seconds 3
+        }
+        
+        if ($tunnelUrl) {
+          "$tunnelUrl/vnc.html|Vps@BcEjLT5A@4" | Out-File -FilePath "info.txt" -Encoding UTF8 -NoNewline
+        } else {
+          "ERROR|Tunnel not found" | Out-File -FilePath "info.txt" -Encoding UTF8 -NoNewline
+        }
+
+    - name: Upload Result
+      uses: actions/upload-artifact@v4
+      with:
+        name: result
+        path: info.txt
+        retention-days: 1
+
+    - name: Keep Alive
+      shell: pwsh
+      run: |
+        for ($k = 1; $k -le 360; $k++) {
+          Start-Sleep -Seconds 60
+        }
